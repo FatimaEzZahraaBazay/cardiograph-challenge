@@ -1,0 +1,7 @@
+{
+  "team": "baseline",
+  "run_id": "run_001",
+  "author_type": "human",
+  "model": "GCN-2layers",
+  "notes": "Simple baseline"
+}

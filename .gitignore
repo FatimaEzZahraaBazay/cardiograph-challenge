@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+
+# Data (DO NOT COMMIT!)
+data/private/
+data/raw/
+*.pt
+*.pth
+*.h5
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models
+best_model.pt
+
+# Logs
+*.log

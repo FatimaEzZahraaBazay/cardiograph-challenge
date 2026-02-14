@@ -1,0 +1,4 @@
+task: graph_regression
+metric: rmse
+target: qt_interval
+valid_range: [300, 500]
