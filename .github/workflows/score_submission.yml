@@ -59,7 +59,27 @@ jobs:
           echo "rmse=$RMSE" >> $GITHUB_OUTPUT
           echo "mae=$MAE" >> $GITHUB_OUTPUT
       
+      - name: Check for duplicate submission
+        id: check_dup
+        run: |
+          git fetch origin main
+          git show origin/main:leaderboard/leaderboard.csv > current_leaderboard.csv 2>/dev/null || \
+            echo "team,model,rmse,mae,timestamp_utc,notes" > current_leaderboard.csv
+          
+          TEAM="${{ steps.find.outputs.team }}"
+          
+          if grep -q "^$TEAM," current_leaderboard.csv; then
+            echo "❌ ERROR: Team '$TEAM' has already submitted!"
+            echo "Only ONE submission attempt per team is allowed."
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "✅ First submission from team '$TEAM'"
+            echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+      
       - name: Update leaderboard
+        if: steps.check_dup.outputs.duplicate == 'false'
         run: |
           MODEL=$(jq -r '.model // "unknown"' ${{ steps.find.outputs.meta }})
           NOTES=$(jq -r '.notes // ""' ${{ steps.find.outputs.meta }})
@@ -73,6 +93,7 @@ jobs:
           python competition/render_leaderboard.py
       
       - name: Commit leaderboard
+        if: steps.check_dup.outputs.duplicate == 'false'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -86,6 +107,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Comment score
+        if: success()
         uses: actions/github-script@v6
         with:
           script: |
@@ -97,5 +119,19 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `## 🎯 Submission Score\n\n**Team:** ${team}\n\n| Metric | Score |\n|--------|-------|\n| **RMSE** | **${rmse} ms** |\n| MAE | ${mae} ms |\n\n✅ Submission valid! Lower RMSE is better.`
+              body: `## 🎯 Submission Score\n\n**Team:** ${team}\n\n| Metric | Score |\n|--------|-------|\n| **RMSE** | **${rmse} ms** |\n| MAE | ${mae} ms |\n\n✅ Submission valid! Lower RMSE is better.\n\n⚠️ **Note:** Only ONE submission per team allowed. You cannot resubmit.`
+            });
+      
+      - name: Comment duplicate rejection
+        if: failure() && steps.check_dup.outputs.duplicate == 'true'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const team = '${{ steps.find.outputs.team }}';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ❌ Duplicate Submission Rejected\n\n**Team:** ${team}\n\nYour team has already submitted to this competition.\n\n**Policy:** Only ONE submission attempt per team is allowed.\n\nPlease check the [leaderboard](../leaderboard/leaderboard.md) for your existing score.`
             });

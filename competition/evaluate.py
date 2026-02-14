@@ -18,6 +18,7 @@ def main(pred_path, label_path):
     print(f"SCORE={results['primary_metric']:.8f}")
     print(f"RMSE={results['rmse']:.8f}")
     print(f"MAE={results['mae']:.8f}")
+    print(f"WITHIN_TOLERANCE={results['within_tolerance_10ms']:.2f}")
 
 if __name__ == "__main__":
     main(sys.argv[1], sys.argv[2])
