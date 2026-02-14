@@ -1,7 +1,26 @@
 """
-CardioGraph: QT Interval Prediction - Data Preparation
+CardioGraph: QT Interval Prediction Challenge - Data Preparation Script
 
-Downloads MIT-BIH and creates patient ECG graphs.
+GRAPH SPECIFICATION (for NeurIPS GNN Competition):
+
+Adjacency Matrix (A):
+- Type: Directed temporal graph
+- Edges: beat_i → beat_i+1 (sequential connections)
+- Stored as: edge_index [2, num_edges] in PyTorch Geometric format
+
+Node Feature Matrix (X):
+- Shape: [num_beats, 3]
+- Features per node:
+  1. RR interval (ms): Time between consecutive R-peaks
+  2. QRS duration (ms): Ventricular depolarization width
+  3. Beat amplitude: Normalized ECG peak height
+
+This script:
+1. Downloads MIT-BIH Arrhythmia Database
+2. Extracts QT intervals from ECG recordings
+3. Creates patient-level graphs (beats as nodes, temporal edges)
+4. Saves train/test splits in PyTorch Geometric format
+...
 """
 
 import os
