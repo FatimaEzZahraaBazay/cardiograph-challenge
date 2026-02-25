@@ -62,13 +62,35 @@ id,y_pred
 
 ## 📤 How to Submit
 
-1. Fork this repository
-2. Create folder: `submissions/inbox/<team>/<run>/`
-3. Add:
-   - `predictions.csv`
-   - `metadata.json`
+### Step 1: Fork this repository
+
+### Step 2: Encrypt your predictions (REQUIRED)
+
+**All submissions must be encrypted for privacy:**
+
+```bash
+pip install cryptography
+python encryption/encrypt_submission.py predictions.csv
+```
+
+This creates `predictions.csv.enc`. ⚠️ **Submit ONLY the `.enc` file, NOT the original CSV!**
+
+### Step 3: Create submission folder
+
+```bash
+mkdir -p submissions/inbox/<your_team>/run_001/
+```
+
+### Step 4: Add your encrypted files
+
+```
+submissions/inbox/<your_team>/run_001/
+├── predictions.csv.enc     # Encrypted predictions (REQUIRED)
+└── metadata.json           # Team metadata (REQUIRED)
+```
 
 **Example metadata.json:**
+
 ```json
 {
   "team": "your_team",
@@ -79,7 +101,15 @@ id,y_pred
 }
 ```
 
-4. Open Pull Request → Auto-scored!
+### Step 5: Open Pull Request
+
+1. Commit: `git add submissions/ && git commit -m "Add submission: your_team"`
+2. Push to your fork
+3. Open PR to `main` branch
+4. **Automatic scoring** decrypts and evaluates
+5. Check PR comment for your score
+
+**🔒 Privacy:** Predictions encrypted with RSA-2048. Only organizer can decrypt.
 
 ---
 
