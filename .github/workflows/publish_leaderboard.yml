@@ -1,38 +1,177 @@
-name: Publish Leaderboard
+name: Score Submission
 
 on:
-  push:
-    branches: [ main ]
+  pull_request:
     paths:
-      - "leaderboard/leaderboard.csv"
+      - 'submissions/inbox/**'
 
 jobs:
-  render:
+  score:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
-
-      - name: Install deps
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-
-      - name: Render leaderboard markdown
+          pip install pandas numpy scikit-learn cryptography
+      
+      - name: Create test labels from secret
         run: |
-          python competition/render_leaderboard.py
-
-      - name: Commit rendered leaderboard
+          mkdir -p data/private
+          echo "${{ secrets.TEST_LABELS }}" > data/private/test_labels.csv
+      
+      - name: Create private key from secret
         run: |
-          if git diff --quiet; then
-            echo "No changes."
-            exit 0
+          echo "${{ secrets.PRIVATE_KEY }}" > encryption/private_key.pem
+          chmod 600 encryption/private_key.pem
+      
+      - name: Find submission
+        id: find
+        run: |
+          # Look for encrypted file first
+          ENC_FILE=$(find submissions/inbox -name "predictions.csv.enc" | head -n 1)
+          META=$(find submissions/inbox -name "metadata.json" | head -n 1)
+          
+          if [ -z "$ENC_FILE" ]; then
+            echo "❌ No encrypted submission found (predictions.csv.enc)"
+            echo "Please encrypt your submission using: python encryption/encrypt_submission.py predictions.csv"
+            exit 1
           fi
-          git config user.name "github-actions"
-          git config user.email "github-actions@users.noreply.github.com"
-          git add leaderboard/leaderboard.md
-          git commit -m "Update leaderboard.md"
-          git push
+          
+          if [ -z "$META" ]; then
+            echo "❌ Missing metadata.json"
+            exit 1
+          fi
+          
+          echo "enc_file=$ENC_FILE" >> $GITHUB_OUTPUT
+          echo "meta_file=$META" >> $GITHUB_OUTPUT
+          
+          TEAM=$(echo $ENC_FILE | cut -d'/' -f3)
+          echo "team=$TEAM" >> $GITHUB_OUTPUT
+      
+      - name: Decrypt submission
+        id: decrypt
+        run: |
+          ENC_FILE="${{ steps.find.outputs.enc_file }}"
+          DECRYPTED="decrypted_predictions.csv"
+          
+          python encryption/decrypt_submission.py \
+            "$ENC_FILE" \
+            encryption/private_key.pem \
+            "$DECRYPTED"
+          
+          echo "pred_file=$DECRYPTED" >> $GITHUB_OUTPUT
+      
+      - name: Validate submission
+        run: |
+          python competition/validate_submission.py \
+            ${{ steps.decrypt.outputs.pred_file }} \
+            data/public/test_ids.csv
+      
+      - name: Evaluate
+        id: score
+        run: |
+          OUT=$(python competition/evaluate.py \
+            ${{ steps.decrypt.outputs.pred_file }} \
+            data/private/test_labels.csv)
+          echo "$OUT"
+          RMSE=$(echo "$OUT" | grep "RMSE=" | cut -d'=' -f2)
+          MAE=$(echo "$OUT" | grep "MAE=" | cut -d'=' -f2)
+          TOL=$(echo "$OUT" | grep "WITHIN_TOLERANCE=" | cut -d'=' -f2)
+          echo "rmse=$RMSE" >> $GITHUB_OUTPUT
+          echo "mae=$MAE" >> $GITHUB_OUTPUT
+          echo "tolerance=$TOL" >> $GITHUB_OUTPUT
+      
+      - name: Check for duplicate submission
+        id: check_dup
+        run: |
+          git fetch origin main
+          git show origin/main:leaderboard/leaderboard.csv > current_leaderboard.csv 2>/dev/null || \
+            echo "team,model,rmse,mae,within_tolerance_10ms,timestamp_utc,notes" > current_leaderboard.csv
+          
+          TEAM="${{ steps.find.outputs.team }}"
+          
+          if grep -q "^$TEAM," current_leaderboard.csv; then
+            echo "❌ ERROR: Team '$TEAM' has already submitted!"
+            echo "duplicate=true" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "✅ First submission from team '$TEAM'"
+            echo "duplicate=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Update leaderboard
+        if: steps.check_dup.outputs.duplicate == 'false'
+        run: |
+          MODEL=$(jq -r '.model // "unknown"' ${{ steps.find.outputs.meta_file }})
+          NOTES=$(jq -r '.notes // ""' ${{ steps.find.outputs.meta_file }})
+          
+          mkdir -p leaderboard
+          cp current_leaderboard.csv leaderboard/leaderboard.csv
+          
+          echo "${{ steps.find.outputs.team }},$MODEL,${{ steps.score.outputs.rmse }},${{ steps.score.outputs.mae }},${{ steps.score.outputs.tolerance }},$(date -u +%Y-%m-%dT%H:%M:%SZ),\"$NOTES\"" >> leaderboard/leaderboard.csv
+          
+          python competition/render_leaderboard.py
+      
+      - name: Commit leaderboard
+        if: steps.check_dup.outputs.duplicate == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout main
+          git pull origin main
+          git add leaderboard/
+          git commit -m "Update leaderboard: ${{ steps.find.outputs.team }} [skip ci]" || true
+          git push origin main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f encryption/private_key.pem
+          rm -f decrypted_predictions.csv
+      
+      - name: Comment score
+        if: success()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const rmse = '${{ steps.score.outputs.rmse }}';
+            const mae = '${{ steps.score.outputs.mae }}';
+            const tolerance = '${{ steps.score.outputs.tolerance }}';
+            const team = '${{ steps.find.outputs.team }}';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🎯 Submission Score\n\n**Team:** ${team}\n\n| Metric | Score |\n|--------|-------|\n| **RMSE** | **${rmse} ms** |\n| MAE | ${mae} ms |\n| Within ±10ms | ${tolerance}% |\n\n✅ Encrypted submission decrypted and scored!\n\n⚠️ **Note:** Only ONE submission per team allowed.`
+            });
+      
+      - name: Comment duplicate rejection
+        if: failure() && steps.check_dup.outputs.duplicate == 'true'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const team = '${{ steps.find.outputs.team }}';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ❌ Duplicate Submission Rejected\n\n**Team:** ${team}\n\nYour team has already submitted.\n\n**Policy:** Only ONE submission attempt per team is allowed.`
+            });
