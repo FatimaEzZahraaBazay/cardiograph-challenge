@@ -16,6 +16,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
       
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -24,72 +25,98 @@ jobs:
       
       - name: Install dependencies
         run: |
-          pip install pandas numpy scikit-learn
+          pip install pandas numpy scikit-learn cryptography
       
       - name: Create test labels from secret
         run: |
           mkdir -p data/private
           echo "${{ secrets.TEST_LABELS }}" > data/private/test_labels.csv
       
-      - name: Find submission
+      - name: Create private key from secret
+        run: |
+          echo "${{ secrets.PRIVATE_KEY }}" > encryption/private_key.pem
+          chmod 600 encryption/private_key.pem
+      
+      - name: Find encrypted submission
         id: find
         run: |
-          PRED=$(find submissions/inbox -name "predictions.csv" | head -n 1)
+          ENC_FILE=$(find submissions/inbox -name "predictions.csv.enc" | head -n 1)
           META=$(find submissions/inbox -name "metadata.json" | head -n 1)
-          echo "pred=$PRED" >> $GITHUB_OUTPUT
-          echo "meta=$META" >> $GITHUB_OUTPUT
-          TEAM=$(echo $PRED | cut -d'/' -f3)
+          
+          if [ -z "$ENC_FILE" ]; then
+            echo "❌ No encrypted submission found"
+            echo "Please encrypt: python encryption/encrypt_submission.py predictions.csv"
+            exit 1
+          fi
+          
+          if [ -z "$META" ]; then
+            echo "❌ Missing metadata.json"
+            exit 1
+          fi
+          
+          echo "enc_file=$ENC_FILE" >> $GITHUB_OUTPUT
+          echo "meta_file=$META" >> $GITHUB_OUTPUT
+          TEAM=$(echo $ENC_FILE | cut -d'/' -f3)
           echo "team=$TEAM" >> $GITHUB_OUTPUT
+      
+      - name: Decrypt submission
+        id: decrypt
+        run: |
+          python encryption/decrypt_submission.py \
+            "${{ steps.find.outputs.enc_file }}" \
+            encryption/private_key.pem \
+            decrypted_predictions.csv
+          echo "pred_file=decrypted_predictions.csv" >> $GITHUB_OUTPUT
       
       - name: Validate submission
         run: |
           python competition/validate_submission.py \
-            ${{ steps.find.outputs.pred }} \
+            ${{ steps.decrypt.outputs.pred_file }} \
             data/public/test_ids.csv
       
       - name: Evaluate
         id: score
         run: |
           OUT=$(python competition/evaluate.py \
-            ${{ steps.find.outputs.pred }} \
+            ${{ steps.decrypt.outputs.pred_file }} \
             data/private/test_labels.csv)
           echo "$OUT"
           RMSE=$(echo "$OUT" | grep "RMSE=" | cut -d'=' -f2)
           MAE=$(echo "$OUT" | grep "MAE=" | cut -d'=' -f2)
+          TOL=$(echo "$OUT" | grep "WITHIN_TOLERANCE=" | cut -d'=' -f2)
           echo "rmse=$RMSE" >> $GITHUB_OUTPUT
           echo "mae=$MAE" >> $GITHUB_OUTPUT
+          echo "tolerance=$TOL" >> $GITHUB_OUTPUT
       
       - name: Check for duplicate submission
         id: check_dup
         run: |
           git fetch origin main
           git show origin/main:leaderboard/leaderboard.csv > current_leaderboard.csv 2>/dev/null || \
-            echo "team,model,rmse,mae,timestamp_utc,notes" > current_leaderboard.csv
+            echo "team,model,rmse,mae,within_tolerance_10ms,timestamp_utc,notes" > current_leaderboard.csv
           
           TEAM="${{ steps.find.outputs.team }}"
           
           if grep -q "^$TEAM," current_leaderboard.csv; then
-            echo "❌ ERROR: Team '$TEAM' has already submitted!"
-            echo "Only ONE submission attempt per team is allowed."
+            echo "❌ Team '$TEAM' already submitted!"
             echo "duplicate=true" >> $GITHUB_OUTPUT
             exit 1
           else
-            echo "✅ First submission from team '$TEAM'"
+            echo "✅ First submission from '$TEAM'"
             echo "duplicate=false" >> $GITHUB_OUTPUT
           fi
       
       - name: Update leaderboard
         if: steps.check_dup.outputs.duplicate == 'false'
         run: |
-          MODEL=$(jq -r '.model // "unknown"' ${{ steps.find.outputs.meta }})
-          NOTES=$(jq -r '.notes // ""' ${{ steps.find.outputs.meta }})
+          MODEL=$(jq -r '.model // "unknown"' ${{ steps.find.outputs.meta_file }})
+          NOTES=$(jq -r '.notes // ""' ${{ steps.find.outputs.meta_file }})
           
           mkdir -p leaderboard
-          if [ ! -f leaderboard/leaderboard.csv ]; then
-            echo "team,model,rmse,mae,timestamp_utc,notes" > leaderboard/leaderboard.csv
-          fi
+          cp current_leaderboard.csv leaderboard/leaderboard.csv
           
-          echo "${{ steps.find.outputs.team }},$MODEL,${{ steps.score.outputs.rmse }},${{ steps.score.outputs.mae }},$(date -u +%Y-%m-%dT%H:%M:%SZ),\"$NOTES\"" >> leaderboard/leaderboard.csv
+          echo "${{ steps.find.outputs.team }},$MODEL,${{ steps.score.outputs.rmse }},${{ steps.score.outputs.mae }},${{ steps.score.outputs.tolerance }},$(date -u +%Y-%m-%dT%H:%M:%SZ),\"$NOTES\"" >> leaderboard/leaderboard.csv
+          
           python competition/render_leaderboard.py
       
       - name: Commit leaderboard
@@ -106,6 +133,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
+      - name: Cleanup sensitive files
+        if: always()
+        run: |
+          rm -f encryption/private_key.pem
+          rm -f decrypted_predictions.csv
+      
       - name: Comment score
         if: success()
         uses: actions/github-script@v6
@@ -113,13 +146,14 @@ jobs:
           script: |
             const rmse = '${{ steps.score.outputs.rmse }}';
             const mae = '${{ steps.score.outputs.mae }}';
+            const tolerance = '${{ steps.score.outputs.tolerance }}';
             const team = '${{ steps.find.outputs.team }}';
             
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `## 🎯 Submission Score\n\n**Team:** ${team}\n\n| Metric | Score |\n|--------|-------|\n| **RMSE** | **${rmse} ms** |\n| MAE | ${mae} ms |\n\n✅ Submission valid! Lower RMSE is better.\n\n⚠️ **Note:** Only ONE submission per team allowed. You cannot resubmit.`
+              body: `## 🎯 Submission Score\n\n**Team:** ${team}\n\n| Metric | Score |\n|--------|-------|\n| **RMSE** | **${rmse} ms** |\n| MAE | ${mae} ms |\n| Within ±10ms | ${tolerance}% |\n\n✅ Encrypted submission decrypted and scored!\n\n⚠️ Only ONE submission per team allowed.`
             });
       
       - name: Comment duplicate rejection
@@ -133,5 +167,5 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `## ❌ Duplicate Submission Rejected\n\n**Team:** ${team}\n\nYour team has already submitted to this competition.\n\n**Policy:** Only ONE submission attempt per team is allowed.\n\nPlease check the [leaderboard](../leaderboard/leaderboard.md) for your existing score.`
+              body: `## ❌ Duplicate Submission Rejected\n\n**Team:** ${team}\n\nAlready submitted.\n\n**Policy:** ONE submission per team.`
             });
